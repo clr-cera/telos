@@ -6,6 +6,7 @@ PAROU, PAROU A DISCUSSÃO
 
 miguwu ><
 ";
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -24,17 +25,17 @@ async fn main() {
 enum Command {
     #[command(description = "Say hello")]
     Hello,
-    #[command(description = "Miguel")]
-    Miguel,
 }
 
 async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
+    let text = msg.text().unwrap_or_default().to_lowercase();
+    if text.contains("miguel") {
+        bot.send_message(msg.chat.id, MIGUEL).await?;
+        return Ok(());
+    }
     match cmd {
         Command::Hello => {
             bot.send_message(msg.chat.id, "Hello!").await?;
-        }
-        Command::Miguel => {
-            bot.send_message(msg.chat.id, MIGUEL).await?;
         }
     }
     Ok(())
