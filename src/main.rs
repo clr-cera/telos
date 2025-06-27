@@ -9,7 +9,6 @@ miguwu ><
 
 #[tokio::main]
 async fn main() {
-    println!("Starting bot...");
     dotenv().ok();
 
     pretty_env_logger::init();
@@ -22,11 +21,21 @@ async fn main() {
 }
 
 async fn answer(bot: Bot, msg: Message) -> ResponseResult<()> {
-    println!("Received message: {:?}", msg);
+    log::info!("Received message: {:?}", msg);
     let text = msg.text().unwrap_or_default().to_lowercase();
-    if text.contains("miguel") {
-        bot.send_message(msg.chat.id, MIGUEL).await?;
+    if !text.contains("miguel") {
         return Ok(());
     }
+    match msg.thread_id {
+        Some(thread_id) => {
+            bot.send_message(msg.chat.id, MIGUEL)
+                .message_thread_id(thread_id)
+                .await?;
+        }
+        None => {
+            bot.send_message(msg.chat.id, MIGUEL).await?;
+        }
+    }
+
     Ok(())
 }
