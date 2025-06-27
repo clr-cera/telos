@@ -2,12 +2,9 @@ use dotenv::dotenv;
 use teloxide::{prelude::*, utils::command::BotCommands};
 
 const MIGUEL: &str = "
-__  __ _____ _____ _    _ ______ _
-|  \\/  |_   _/ ____| |  | |  ____| |
-| \\  / | | || |  __| |  | | |__  | |
-| |\\/| | | || | |_ | |  | |  __| | |
-| |  | |_| || |__| | |__| | |____| |____
-|_|  |_|_____\\_____|\\____/|______|______|
+PAROU, PAROU A DISCUSSÃO
+
+miguwu ><
 ";
 #[tokio::main]
 async fn main() {
