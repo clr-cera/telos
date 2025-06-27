@@ -1,0 +1,4 @@
+services:
+  telos:
+    build:
+      dockerfile: Dockerfile
