@@ -23,7 +23,7 @@ async fn main() {
 async fn answer(bot: Bot, msg: Message) -> ResponseResult<()> {
     log::info!("Received message: {:?}", msg);
     let text = msg.text().unwrap_or_default().to_lowercase();
-    if !text.contains("miguel") {
+    if !text.contains("/miguel") {
         return Ok(());
     }
     match msg.thread_id {
