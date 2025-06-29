@@ -2,4 +2,10 @@ services:
   telos:
     build:
       dockerfile: Dockerfile
+    volumes:
+      - telos-data:/data
     restart: always
+    environment:
+      DATABASE_PATH: /data/db.sqlite
+volumes:
+  telos-data:
