@@ -8,10 +8,10 @@ mod handler;
 mod admin;
 mod miguel;
 
-async fn create_db() -> Result<db::DB, rusqlite::Error> {
-    let path = env::var("DATABASE_PATH").unwrap_or_else(|_| ".db.sqlite".to_string());
+async fn create_db() -> Result<db::DB, Box<dyn std::error::Error>> {
+    let path = env::var("DATABASE_PATH").unwrap_or_else(|_| "sqlite://db.sqlite?mode=rwc".to_string());
 
-    let db = db::DB::new(&path)?;
+    let db = db::DB::new(&path).await?;
     db.migrate().await?;
 
     log::info!("Database created at {:?}", path);

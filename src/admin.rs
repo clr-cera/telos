@@ -1,4 +1,4 @@
-use teloxide::{prelude::*, types::User};
+use teloxide::{prelude::*};
 
 use crate::db;
 
@@ -13,11 +13,11 @@ impl AdminHandler {
     }
 
     pub async fn check_whitelist(&self, msg: &Message) -> Result<bool, Box<dyn std::error::Error>> {
-        if msg.chat.is_group() {
+        if msg.chat.is_group() || msg.chat.is_supergroup() {
             match self.is_group_allowed(msg.chat.id.0).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    log::info!("Group is not whitelisted: {:?}", msg);
+                    log::trace!("Group is not whitelisted: {:?}", msg);
                     return Ok(false);
                 }
                 Err(e) => {
@@ -30,7 +30,7 @@ impl AdminHandler {
                 match self.is_thread_allowed(thread_id.0.0, msg.chat.id.0).await {
                     Ok(true) => {}
                     Ok(false) => {
-                        log::info!("Thread is not whitelisted: {:?}", msg);
+                        log::trace!("Thread is not whitelisted: {:?}", msg);
                         return Ok(false);
                     }
                     Err(e) => {
@@ -44,11 +44,11 @@ impl AdminHandler {
         Ok(true)
     }
 
-    pub async fn is_group_allowed(&self, group_id: i64) -> Result<bool, rusqlite::Error> {
+    pub async fn is_group_allowed(&self, group_id: i64) -> Result<bool, sqlx::Error> {
         self.db.is_group_whitelisted(group_id).await
     }
 
-    pub async fn is_thread_allowed(&self, thread_id: i32, group_id: i64) -> Result<bool, rusqlite::Error> {
+    pub async fn is_thread_allowed(&self, thread_id: i32, group_id: i64) -> Result<bool, sqlx::Error> {
         self.db.is_thread_whitelisted(thread_id, group_id).await
     }
 
@@ -59,9 +59,20 @@ impl AdminHandler {
 
         let from = msg.from.as_ref().unwrap().clone();
 
-        let admin = match self.db.get_admin(from.id.0).await {
+        let text = msg.text().unwrap_or_default().to_lowercase();
+
+        let cmd = match text.split_once(" ") {
+            None => text.as_str(),
+            Some((cmd, _)) => cmd,
+        };
+
+        let admin = match self.db.get_admin(from.id.0 as i64).await {
             Ok(Some(admin)) => admin,
             Ok(None) => {
+                if cmd == "/become_admin" {
+                    return self.become_admin(bot, msg).await;
+                }
+
                 log::info!("User is not admin: {:?}", msg);
                 return Ok(());
             }
@@ -71,15 +82,11 @@ impl AdminHandler {
             }
         };
 
-        let text = msg.text().unwrap_or_default().to_lowercase();
 
-        let cmd = match text.split_once(" ") {
-            None => text.as_str(),
-            Some((cmd, _)) => cmd,
-        };
+        log::trace!("Command: {cmd:?}");
+        log::trace!("Text: {text:?}");
 
         match cmd {
-            "/add_admin" => self.add_admin(bot, msg, from.id.0).await?,
             "/whitelist_group" => self.whitelist_group(bot, msg, from.id.0).await?,
             "/whitelist_thread" => self.whitelist_thread(bot, msg, from.id.0).await?,
             "/unwhitelist_group" => self.unwhitelist_group(bot, msg, from.id.0).await?,
@@ -89,6 +96,9 @@ impl AdminHandler {
             "/list_admins" => self.list_admins(bot, msg).await?,
             "/list_whitelisted_groups" => self.list_whitelisted_groups(bot, msg).await?,
             "/list_whitelisted_threads" => self.list_whitelisted_threads(bot, msg).await?,
+            "/approve_become_admin" => self.approve_become_admin(bot, msg, from.id.0).await?,
+            "/reject_become_admin" => self.reject_become_admin(bot, msg, from.id.0).await?,
+            "/list_become_admin_requests" => self.list_become_admin_requests(bot, msg).await?,
             "/help" => self.help(bot, msg).await?,
             &_ => {
                 return Ok(());
@@ -99,43 +109,10 @@ impl AdminHandler {
         Ok(())
     }
 
-    async fn add_admin(&self, bot: &Bot, msg: &Message, admin_id: u64) -> Result<(), teloxide::RequestError> {
-        // This command is only valid in private chats
-        if !msg.chat.is_private() {
-            return Ok(());
-        }
-
-        let mentions: Vec<&User> = msg.mentioned_users().take(2).collect();
-
-        if mentions.len() != 1 {
-            bot.send_message(msg.chat.id, "Invalid command, use /add_admin <@username>").await?;
-            return Ok(());
-        }
-
-        let user_id = mentions[0].id.0;
-        let user_name= mentions[0].username.as_deref();
-
-        match self.db.add_admin(
-                user_id, 
-            admin_id,
-                user_name,
-            ).await {
-            Ok(_) => {
-                bot.send_message(msg.chat.id, "Admin added!").await?;
-            }
-            Err(e) => {
-                log::error!("Error adding admin: {:?}", e);
-                bot.send_message(msg.chat.id, "Error adding admin!").await?;
-            }
-        }
-
-        Ok(())
-    }
-
-
     async fn whitelist_group(&self, bot: &Bot, msg: &Message, admin_id: u64) -> Result<(), teloxide::RequestError> {
+        log::trace!("Whtelisting group: {:?}", msg);
         // This command is only valid in groups
-        if !msg.chat.is_group() {
+        if !msg.chat.is_group() && !msg.chat.is_supergroup() {
             return Ok(());
         }
 
@@ -144,7 +121,7 @@ impl AdminHandler {
 
         match self.db.add_whitelisted_group(
             group_id, 
-            admin_id,
+            admin_id as i64,
             group_name,
         ).await {
             Ok(_) => {
@@ -168,8 +145,8 @@ impl AdminHandler {
     }
 
     async fn whitelist_thread(&self, bot: &Bot, msg: &Message, admin_id: u64) -> Result<(), teloxide::RequestError> {
-        // This command is only valid in private chats
-        if !msg.chat.is_group() {
+        log::trace!("Whtelisting thread: {:?}", msg);
+        if !msg.chat.is_supergroup() {
             return Ok(());
         }
 
@@ -188,7 +165,7 @@ impl AdminHandler {
         match self.db.add_whitelisted_thread(
             thread_id.0.0, 
             group_id, 
-            admin_id,
+            admin_id as i64,
             group_name,
             thread_name,
         ).await {
@@ -209,9 +186,10 @@ impl AdminHandler {
     }
 
     async fn unwhitelist_group(&self, bot: &Bot, msg: &Message, _admin_id: u64) -> ResponseResult<()> {
+        log::trace!("Unwhitelisting group: {:?}", msg);
         let text = msg.text().unwrap_or_default().to_lowercase();
 
-        let group_id = if msg.chat.is_group() {
+        let group_id = if msg.chat.is_group() || msg.chat.is_supergroup() {
             msg.chat.id.0
         } else {
             // Parse form the text
@@ -220,13 +198,21 @@ impl AdminHandler {
                     match group_id.parse::<i64>() {
                         Ok(group_id) => group_id,
                         Err(_) => {
-                            bot.send_message(msg.chat.id, "Invalid group id").await?;
+                            let mut reply = bot.send_message(msg.chat.id, "Invalid group id");
+                            if let Some(thread_id) = msg.thread_id {
+                                reply = reply.message_thread_id(thread_id);
+                            }
+                            reply.await?;
                             return Ok(());
                         }
                     }
                 }
                 None => {
-                    bot.send_message(msg.chat.id, "Invalid command, use /unwhitelist_group <@group_id>").await?;
+                    let mut reply = bot.send_message(msg.chat.id, "Invalid command, use /unwhitelist_group <@group_id>");
+                    if let Some(thread_id) = msg.thread_id {
+                        reply = reply.message_thread_id(thread_id);
+                    }
+                    reply.await?;
                     return Ok(());
                 }
             }
@@ -234,11 +220,19 @@ impl AdminHandler {
 
         match self.db.remove_whitelisted_group(group_id).await {
             Ok(_) => {
-                bot.send_message(msg.chat.id, "Group unwhitelisted!").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Group unwhitelisted!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
             }
             Err(e) => {
                 log::error!("Error unwhitelisting group: {:?}", e);
-                bot.send_message(msg.chat.id, "Error unwhitelisting group!").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Error unwhitelisting group!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
             }
         }
 
@@ -246,13 +240,18 @@ impl AdminHandler {
     }
 
     async fn unwhitelist_thread(&self, bot: &Bot, msg: &Message, _admin_id: u64) -> ResponseResult<()> {
+        log::trace!("Unwhitelisting thread: {:?}", msg);
         let text = msg.text().unwrap_or_default().to_lowercase();
         let args =  text.split_whitespace().collect::<Vec<&str>>();
 
         let (group_id, thread_id) = match args.len() {
             1 => {
-                if !msg.chat.is_group() {
-                    bot.send_message(msg.chat.id, "Invalid command: Use /unwhitelist_thread <@group_id> <@thread_id>").await?;
+                if !msg.chat.is_group() && !msg.chat.is_supergroup() {
+                    let mut reply = bot.send_message(msg.chat.id, "Invalid command: Use /unwhitelist_thread <@group_id> <@thread_id>");
+                    if let Some(thread_id) = msg.thread_id {
+                        reply = reply.message_thread_id(thread_id);
+                    }
+                    reply.await?;
                     return Ok(());
                 }
 
@@ -268,7 +267,7 @@ impl AdminHandler {
                 }
             },
             2 => {
-                if !msg.chat.is_group() {
+                if !msg.chat.is_group() && !msg.chat.is_supergroup() {
                     bot.send_message(msg.chat.id, "Invalid command: Use /unwhitelist_thread <@group_id> <@thread_id>").await?;
                     return Ok(());
                 }
@@ -276,7 +275,11 @@ impl AdminHandler {
                 let thread_id = match args[1].parse::<i32>() {
                     Ok(id) => id,
                     Err(_) => {
-                        bot.send_message(msg.chat.id, "Invalid thread ID format").await?;
+                        let mut reply = bot.send_message(msg.chat.id, "Invalid thread ID format");
+                        if let Some(thread_id) = msg.thread_id {
+                            reply = reply.message_thread_id(thread_id);
+                        }
+                        reply.await?;
                         return Ok(());
                     }
                 };
@@ -287,35 +290,55 @@ impl AdminHandler {
                 let group_id = match args[1].parse::<i64>() {
                     Ok(id) => id,
                     Err(_) => {
-                        bot.send_message(msg.chat.id, "Invalid group ID format").await?;
+                        let mut reply = bot.send_message(msg.chat.id, "Invalid group ID format");
+                        if let Some(thread_id) = msg.thread_id {
+                            reply = reply.message_thread_id(thread_id);
+                        }
+                        reply.await?;
                         return Ok(());
                     }
                 };
                 let thread_id = match args[2].parse::<i32>() {
                     Ok(id) => id,
                     Err(_) => {
-                        bot.send_message(msg.chat.id, "Invalid thread ID format").await?;
+                        let mut reply = bot.send_message(msg.chat.id, "Invalid thread ID format");
+                        if let Some(thread_id) = msg.thread_id {
+                            reply = reply.message_thread_id(thread_id);
+                        }
+                        reply.await?;
                         return Ok(());
                     }
                 };
                 (group_id, thread_id)
             },
             _ => {
-                bot.send_message(
+                let mut reply = bot.send_message(
                     msg.chat.id,
                     "Invalid command format. Usage:\n/unwhitelist_thread\n/unwhitelist_thread <thread_id>\n/unwhitelist_thread <group_id> <thread_id>"
-                ).await?;
+                );
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
                 return Ok(());
             }
         };
 
         match self.db.remove_whitelisted_thread(thread_id, group_id).await {
             Ok(_) => {
-                bot.send_message(msg.chat.id, "Thread unwhitelisted!").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Thread unwhitelisted!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
             }
             Err(e) => {
                 log::error!("Error unwhitelisting thread: {:?}", e);
-                bot.send_message(msg.chat.id, "Error unwhitelisting thread!").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Error unwhitelisting thread!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
             }
         }
 
@@ -323,6 +346,7 @@ impl AdminHandler {
     }
 
     async fn remove_admin(&self, bot: &Bot, msg: &Message, admin: db::Admin) -> ResponseResult<()> {
+        log::trace!("Removing admin: {:?}", msg);
         let text = msg.text().unwrap_or_default().to_lowercase();
 
         let user_id = match text.split_whitespace().nth(1) {
@@ -330,39 +354,67 @@ impl AdminHandler {
                 match user_id.parse::<u64>() {
                     Ok(user_id) => user_id,
                     Err(_) => {
-                        bot.send_message(msg.chat.id, "Invalid user id").await?;
+                        let mut reply = bot.send_message(msg.chat.id, "Invalid user id");
+                        if let Some(thread_id) = msg.thread_id {
+                            reply = reply.message_thread_id(thread_id);
+                        }
+                        reply.await?;
                         return Ok(());
                     }
                 }
             },
             None => {
-                bot.send_message(msg.chat.id, "Invalid command, use /remove_admin <@user_id>").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Invalid command, use /remove_admin <@user_id>");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
                 return Ok(());
             }
         };
 
         
         if admin.is_superadmin() {
-            match self.db.remove_admin(user_id).await {
+            match self.db.remove_admin(user_id as i64).await {
                 Ok(_) => {
-                    bot.send_message(msg.chat.id, "Admin removed!").await?;
+                    let mut reply = bot.send_message(msg.chat.id, "Admin removed!");
+                    if let Some(thread_id) = msg.thread_id {
+                        reply = reply.message_thread_id(thread_id);
+                    }
+                    reply.await?;
                 }
                 Err(e) => {
                     log::error!("Error removing admin: {:?}", e);
-                    bot.send_message(msg.chat.id, "Error removing admin!").await?;
+                    let mut reply = bot.send_message(msg.chat.id, "Error removing admin!");
+                    if let Some(thread_id) = msg.thread_id {
+                        reply = reply.message_thread_id(thread_id);
+                    }
+                    reply.await?;
                 }
             }
         } else {
-            match self.db.remove_admin_with_traversal(user_id, admin.user_id).await {
+            match self.db.remove_admin_with_traversal(user_id as i64, admin.user_id).await {
                 Ok(true) => {
-                    bot.send_message(msg.chat.id, "Admin removed!").await?;
+                    let mut reply = bot.send_message(msg.chat.id, "Admin removed!");
+                    if let Some(thread_id) = msg.thread_id {
+                        reply = reply.message_thread_id(thread_id);
+                    }
+                    reply.await?;
                 }
                 Ok(false) => {
-                    bot.send_message(msg.chat.id, "You are not an admin of this user").await?;
+                    let mut reply = bot.send_message(msg.chat.id, "You are not an admin of this user");
+                    if let Some(thread_id) = msg.thread_id {
+                        reply = reply.message_thread_id(thread_id);
+                    }
+                    reply.await?;
                 }
                 Err(e) => {
                     log::error!("Error removing admin: {:?}", e);
-                    bot.send_message(msg.chat.id, "Error removing admin!").await?;
+                    let mut reply = bot.send_message(msg.chat.id, "Error removing admin!");
+                    if let Some(thread_id) = msg.thread_id {
+                        reply = reply.message_thread_id(thread_id);
+                    }
+                    reply.await?;
                 }
             }
         }
@@ -372,13 +424,14 @@ impl AdminHandler {
 
 
     async fn make_superadmin(&self, bot: &Bot, msg: &Message, admin: db::Admin) -> ResponseResult<()> {
+        log::trace!("Making superadmin: {:?}", msg);
         // This command is only valid in private chats
-        if !msg.chat.is_private() {
-            return Ok(());
-        }
-
         if !admin.is_superadmin() {
-            bot.send_message(msg.chat.id, "You are not a superadmin").await?;
+            let mut reply = bot.send_message(msg.chat.id, "You are not a superadmin");
+            if let Some(thread_id) = msg.thread_id {
+                reply = reply.message_thread_id(thread_id);
+            }
+            reply.await?;
             return Ok(());
         }
 
@@ -391,24 +444,40 @@ impl AdminHandler {
             Some(target_id) => {
                 match target_id.parse::<u64>() {
                     Ok(target_id) => {
-                        match self.db.make_superadmin(target_id).await {
+                        match self.db.make_superadmin(target_id as i64).await {
                             Ok(_) => {
-                                bot.send_message(msg.chat.id, "Superadmin made!").await?;
+                                let mut reply = bot.send_message(msg.chat.id, "Superadmin made!");
+                                if let Some(thread_id) = msg.thread_id {
+                                    reply = reply.message_thread_id(thread_id);
+                                }
+                                reply.await?;
                             }
                             Err(e) => {
                                 log::error!("Error making superadmin: {:?}", e);
-                                bot.send_message(msg.chat.id, "Error making superadmin!").await?;
+                                let mut reply = bot.send_message(msg.chat.id, "Error making superadmin!");
+                                if let Some(thread_id) = msg.thread_id {
+                                    reply = reply.message_thread_id(thread_id);
+                                }
+                                reply.await?;
                             }
                         }
                     },
                     Err(_) => {
-                        bot.send_message(msg.chat.id, "Invalid user id").await?;
+                        let mut reply = bot.send_message(msg.chat.id, "Invalid user id");
+                        if let Some(thread_id) = msg.thread_id {
+                            reply = reply.message_thread_id(thread_id);
+                        }
+                        reply.await?;
                         return Ok(());
                     }
                 }
             },
             None => {
-                bot.send_message(msg.chat.id, "Invalid command, use /make_superadmin <@user_id>").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Invalid command, use /make_superadmin <@user_id>");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
                 return Ok(());
             }
         }
@@ -417,11 +486,17 @@ impl AdminHandler {
     }
 
     async fn list_admins(&self, bot: &Bot, msg: &Message) -> ResponseResult<()> {
+        log::trace!("Listing admins: {:?}", msg);
+
         let admins = match self.db.get_admins().await {
             Ok(admins) => admins,
             Err(e) => {
                 log::error!("Error listing admins: {:?}", e);
-                bot.send_message(msg.chat.id, "Error listing admins!").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Error listing admins!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
                 return Ok(());
             }
         };
@@ -431,17 +506,26 @@ impl AdminHandler {
             message_lines.push(format!("{:?}", admin));
         }
         
-        bot.send_message(msg.chat.id, message_lines.join("\n")).await?; 
+        let mut reply = bot.send_message(msg.chat.id, message_lines.join("\n"));
+        if let Some(thread_id) = msg.thread_id {
+            reply = reply.message_thread_id(thread_id);
+        }
+        reply.await?;
 
         Ok(())
     }
 
     async fn list_whitelisted_groups(&self, bot: &Bot, msg: &Message) -> ResponseResult<()> {
+        log::trace!("Listing whitelisted groups: {:?}", msg);
         let groups = match self.db.get_whitelisted_groups().await {
             Ok(groups) => groups,
             Err(e) => {
                 log::error!("Error listing whitelisted groups: {:?}", e);
-                bot.send_message(msg.chat.id, "Error listing whitelisted groups!").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Error listing whitelisted groups!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
                 return Ok(());
             }
         };
@@ -451,17 +535,26 @@ impl AdminHandler {
             message_lines.push(format!("{:?}", group));
         }
 
-        bot.send_message(msg.chat.id, message_lines.join("\n")).await?;
+        let mut reply = bot.send_message(msg.chat.id, message_lines.join("\n"));
+        if let Some(thread_id) = msg.thread_id {
+            reply = reply.message_thread_id(thread_id);
+        }
+        reply.await?;
 
         Ok(())
     }
 
     async fn list_whitelisted_threads(&self, bot: &Bot, msg: &Message) -> ResponseResult<()> {
+        log::trace!("Listing whitelisted threads: {:?}", msg);
         let threads = match self.db.get_whitelisted_threads(msg.chat.id.0).await {
             Ok(threads) => threads,
             Err(e) => {
                 log::error!("Error listing whitelisted threads: {:?}", e);
-                bot.send_message(msg.chat.id, "Error listing whitelisted threads!").await?;
+                let mut reply = bot.send_message(msg.chat.id, "Error listing whitelisted threads!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
                 return Ok(());
             }
         };
@@ -471,28 +564,216 @@ impl AdminHandler {
             message_lines.push(format!("{:?}", thread));
         }
 
-        bot.send_message(msg.chat.id, message_lines.join("\n")).await?;
+        let mut reply = bot.send_message(msg.chat.id, message_lines.join("\n"));
+        if let Some(thread_id) = msg.thread_id {
+            reply = reply.message_thread_id(thread_id);
+        }
+        reply.await?;
 
         Ok(())
     }
 
-    async fn help(&self, bot: &Bot, msg: &Message) -> ResponseResult<()> {
+    async fn become_admin(&self, bot: &Bot, msg: &Message) -> ResponseResult<()> {
+        log::trace!("Becoming admin: {:?}", msg);
 
-        let help = r#"
-/add_admin <@user_id> [<@user_name>]
-/whitelist_group <@group_id> [<@group_name>]
-/whitelist_thread <@group_id> <@thread_id> [<@thread_name>]
-/unwhitelist_group <@group_id>
-/unwhitelist_thread <@group_id> <@thread_id>
-/remove_admin <@user_id>
-/make_superadmin <@user_id>
-/list_admins
-/list_whitelisted_groups
-/list_whitelisted_threads
+        if msg.from.is_none() {
+            return Ok(());
+        }
+
+        let user_id = msg.from.as_ref().unwrap().id.0;
+        let user_name= msg.from.as_ref().unwrap().username.as_deref();
+
+
+        match self.db.create_become_admin_request(user_id as i64, user_name).await {
+            Ok(Some(request_id)) => {
+                let mut reply = bot.send_message(msg.chat.id, format!("Request created, use /approve_become_admin <{}> to approve", request_id));
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+            }
+            Ok(None) => {
+                let mut reply = bot.send_message(msg.chat.id, "Error creating request");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+            }
+            Err(e) => {
+                log::error!("Error creating become admin request: {:?}", e);
+                let mut reply = bot.send_message(msg.chat.id, "Error creating become admin request!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn approve_become_admin(&self, bot: &Bot, msg: &Message, admin_id: u64) -> ResponseResult<()> {
+        log::trace!("Approving become admin: {:?}", msg);
+        let text = msg.text().unwrap_or_default().to_lowercase();
+
+        let request_id = match text.split_whitespace().nth(1) {
+            Some(request_id) => {
+                match request_id.parse::<String>() {
+                    Ok(request_id) => request_id,
+                    Err(_) => {
+                        let mut reply = bot.send_message(msg.chat.id, "Invalid request id");
+                        if let Some(thread_id) = msg.thread_id {
+                            reply = reply.message_thread_id(thread_id);
+                        }
+                        reply.await?;
+                        return Ok(());
+                    }
+                }
+            },
+            None => {
+                let mut reply = bot.send_message(msg.chat.id, "Invalid command, use /approve_become_admin <request_id>");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+                return Ok(());
+            }
+        };
+
+        match self.db.approve_become_admin_request(&request_id, admin_id as i64).await {
+            Ok(_) => {
+                let mut reply = bot.send_message(msg.chat.id, "Admin approved!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+            }
+            Err(e) => {
+                log::error!("Error approving become admin request: {:?}", e);
+                let mut reply = bot.send_message(msg.chat.id, "Error approving become admin request!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn reject_become_admin(&self, bot: &Bot, msg: &Message, _admin_id: u64) -> ResponseResult<()> {
+        log::trace!("Rejecting become admin: {:?}", msg);
+        let text = msg.text().unwrap_or_default().to_lowercase();
+
+        let request_id = match text.split_whitespace().nth(1) {
+            Some(request_id) => {
+                match request_id.parse::<String>() {
+                    Ok(request_id) => request_id,
+                    Err(_) => {
+                        let mut reply = bot.send_message(msg.chat.id, "Invalid request id");
+                        if let Some(thread_id) = msg.thread_id {
+                            reply = reply.message_thread_id(thread_id);
+                        }
+                        reply.await?;
+                        return Ok(());
+                    }
+                }
+            },
+            None => {
+                let mut reply = bot.send_message(msg.chat.id, "Invalid command, use /reject_become_admin <request_id>");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+                return Ok(());
+            }
+        };
+
+        match self.db.reject_become_admin_request(&request_id).await {
+            Ok(_) => {
+                let mut reply = bot.send_message(msg.chat.id, "Admin rejected!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+            }
+            Err(e) => {
+                log::error!("Error rejecting become admin request: {:?}", e);
+                let mut reply = bot.send_message(msg.chat.id, "Error rejecting become admin request!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn list_become_admin_requests(&self, bot: &Bot, msg: &Message) -> ResponseResult<()> {
+        log::trace!("Listing become admin requests: {:?}", msg);
+
+        let requests = match self.db.get_become_admin_requests().await {
+            Ok(requests) => requests,
+            Err(e) => {
+                log::error!("Error listing become admin requests: {:?}", e);
+                let mut reply = bot.send_message(msg.chat.id, "Error listing become admin requests!");
+                if let Some(thread_id) = msg.thread_id {
+                    reply = reply.message_thread_id(thread_id);
+                }
+                reply.await?;
+                return Ok(());
+            }
+        };
+
+        let mut message_lines = vec!["Become admin requests:".to_string()];
+        for request in requests {
+            message_lines.push(format!("{:?}", request));
+        }
+        
+        let mut reply = bot.send_message(msg.chat.id, message_lines.join("\n"));
+        if let Some(thread_id) = msg.thread_id {
+            reply = reply.message_thread_id(thread_id);
+        }
+        reply.await?;
+
+        Ok(())
+    }
+
+async fn help(&self, bot: &Bot, msg: &Message) -> ResponseResult<()> {
+    log::trace!("Help: {:?}", msg);
+
+    let help = r#"
+<b>🛠️ Admin Commands</b>
+/list_admins — List all registered admins.
+/remove_admin &lt;user_id&gt; — Remove an admin.
+/make_superadmin &lt;user_id&gt; — Promote an admin to superadmin.
+/become_admin — Request admin access.
+/approve_become_admin &lt;request_id&gt; — Approve a request to become admin.
+/reject_become_admin &lt;request_id&gt; — Reject a request.
+/list_become_admin_requests — List all pending admin requests.
+
+<b>✅ Whitelist Management</b>
+/whitelist_group — Whitelist the current group.
+/whitelist_thread — Whitelist the current thread.
+/unwhitelist_group [group_id] — Remove a group from whitelist.
+/unwhitelist_thread [group_id] [thread_id] — Remove a thread from whitelist.
+/list_whitelisted_groups — Show all whitelisted groups.
+/list_whitelisted_threads — Show whitelisted threads in this group.
+
+<b>ℹ️ General</b>
+/help — Show this help message.
 "#;
 
-        bot.send_message(msg.chat.id, help).await?;
+    let mut reply = bot.send_message(msg.chat.id, help)
+        .parse_mode(teloxide::types::ParseMode::Html);
 
-        Ok(())
+    if let Some(thread_id) = msg.thread_id {
+        reply = reply.message_thread_id(thread_id);
     }
+
+    reply.await?;
+
+    Ok(())
+}
 }

@@ -1,4 +1,3 @@
--- Migration 1
 CREATE TABLE IF NOT EXISTS admins (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
@@ -31,4 +30,13 @@ CREATE TABLE IF NOT EXISTS whitelisted_threads (
     PRIMARY KEY(thread_id, group_id),
     FOREIGN KEY(group_id) REFERENCES whitelisted_groups(group_id) ON DELETE CASCADE
     FOREIGN KEY(added_by) REFERENCES admins(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS become_admin_requests (
+    request_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    user_name TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    pending BOOLEAN DEFAULT TRUE,
+    accepted BOOLEAN
 );

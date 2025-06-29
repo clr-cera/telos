@@ -1,41 +1,56 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
-use tokio::sync::Mutex;
+use sqlx::migrate::Migrator;
+use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::Error;
+use uuid::Uuid;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
 pub struct DB {
-    db: Arc<Mutex<Connection>>,
+    db: Arc<SqlitePool>,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[allow(unused)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub struct Admin {
-    pub user_id: u64,
+    pub user_id: i64,
     pub name: Option<String>,
-    pub added_by: Option<u64>,
+    pub added_by: Option<i64>,
     pub added_at: Option<DateTime<Utc>>,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[allow(unused)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub struct WhitelistedGroup {
     pub group_id: i64,
     pub group_name: Option<String>,
-    pub added_by: Option<u64>,
+    pub added_by: Option<i64>,
     pub created_at: Option<DateTime<Utc>>,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[allow(unused)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub struct WhitelistedThread {
     pub thread_id: i32,
     pub group_id: i64,
     pub group_name: Option<String>,
     pub thread_name: Option<String>,
-    pub added_by: Option<u64>,
+    pub added_by: Option<i64>,
     pub created_at: Option<DateTime<Utc>>,
+}
+
+#[allow(unused)]
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct BecomeAdminRequest {
+    pub request_id: String,
+    pub user_id: i64,
+    pub user_name: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub pending: Option<bool>,
+    pub accepted: Option<bool>,
 }
 
 impl Admin {
@@ -45,253 +60,270 @@ impl Admin {
 }
 
 impl DB {
-    pub fn new(path: &str) -> Result<Self, rusqlite::Error> {
-        let db = Connection::open(path)?;
-        Ok(Self { db: Arc::new(Mutex::new(db)) })
+    pub async fn new(path: &str) -> Result<Self, Error> {
+        let db = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(path)
+            .await?;
+        Ok(Self { db: Arc::new(db) })
     }
 
-    pub async fn migrate(&self) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-
-        conn.execute_batch(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/init.sql")))?;
-
-        log::info!("Database migration applied successfully.");
-
+    pub async fn migrate(&self) -> Result<(), Error> {
+        MIGRATOR.run(&*self.db).await?;
+        log::info!("Migrations applied successfully.");
         Ok(())
     }
 
-    pub async fn add_admin(
-        &self, 
-        user_id: u64, 
-        added_by: u64,
-        name: Option<&str>,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-        conn.execute(
-            "INSERT INTO admins (user_id, name, added_by) VALUES (?1, ?2, ?3)",
-            params![user_id, name, added_by],
-        )?;
-
+    pub async fn add_admin(&self, user_id: i64, added_by: i64, name: Option<&str>) -> Result<(), Error> {
+        sqlx::query("INSERT INTO admins (user_id, name, added_by) VALUES (?, ?, ?)")
+            .bind(user_id)
+            .bind(name)
+            .bind(added_by)
+            .execute(&*self.db)
+            .await?;
         Ok(())
     }
 
-    pub async fn add_whitelisted_group(
-        &self, 
-        group_id: i64, 
-        added_by: u64,
-        group_name: Option<&str>,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-        conn.execute(
-            "INSERT INTO whitelisted_groups (group_id, group_name, added_by) VALUES (?1, ?2, ?3)",
-            params![group_id, group_name, added_by],
-        )?;
-
+    pub async fn add_whitelisted_group(&self, group_id: i64, added_by: i64, group_name: Option<&str>) -> Result<(), Error> {
+        sqlx::query("INSERT INTO whitelisted_groups (group_id, group_name, added_by) VALUES (?, ?, ?)")
+            .bind(group_id)
+            .bind(group_name)
+            .bind(added_by)
+            .execute(&*self.db)
+            .await?;
         Ok(())
     }
 
     pub async fn add_whitelisted_thread(
-        &self, 
-        thread_id: i32, 
-        group_id: i64, 
-        added_by: u64,
-        group_name: Option<&str>,
-        thread_name: Option<&str>,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-        conn.execute(
-            "INSERT INTO whitelisted_threads (thread_id, group_id, added_by, group_name, thread_name) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![thread_id, group_id, added_by, group_name, thread_name],
-        )?;
-
-        Ok(())
-    }
-
-    pub async fn remove_whitelisted_group(
-        &self, 
-        group_id: i64,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-        conn.execute(
-            "DELETE FROM whitelisted_groups WHERE group_id = ?1",
-            params![group_id],
-        )?;
-
-        Ok(())
-    }
-
-    pub async fn remove_whitelisted_thread(
-        &self, 
+        &self,
         thread_id: i32,
         group_id: i64,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-        conn.execute(
-            "DELETE FROM whitelisted_threads WHERE thread_id = ?1 AND group_id = ?2",
-            params![thread_id, group_id],
-        )?;
-
+        added_by: i64,
+        group_name: Option<&str>,
+        thread_name: Option<&str>,
+    ) -> Result<(), Error> {
+        sqlx::query("INSERT INTO whitelisted_threads (thread_id, group_id, added_by, group_name, thread_name) VALUES (?, ?, ?, ?, ?)")
+            .bind(thread_id)
+            .bind(group_id)
+            .bind(added_by)
+            .bind(group_name)
+            .bind(thread_name)
+            .execute(&*self.db)
+            .await?;
         Ok(())
     }
 
-    pub async fn remove_admin(
-        &self, 
-        user_id: u64,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-        conn.execute(
-            "DELETE FROM admins WHERE user_id = ?1",
-            params![user_id],
-        )?;
-
+    pub async fn remove_whitelisted_group(&self, group_id: i64) -> Result<(), Error> {
+        sqlx::query("DELETE FROM whitelisted_groups WHERE group_id = ?")
+            .bind(group_id)
+            .execute(&*self.db)
+            .await?;
         Ok(())
     }
 
-    pub async fn remove_admin_with_traversal(
-        &self, 
-        user_id: u64,
-        remover_id: u64,
-    ) -> Result<bool, rusqlite::Error> {
-        let conn = self.db.lock().await;
+    pub async fn remove_whitelisted_thread(&self, thread_id: i32, group_id: i64) -> Result<(), Error> {
+        sqlx::query("DELETE FROM whitelisted_threads WHERE thread_id = ? AND group_id = ?")
+            .bind(thread_id)
+            .bind(group_id)
+            .execute(&*self.db)
+            .await?;
+        Ok(())
+    }
 
+    pub async fn remove_admin(&self, user_id: i64) -> Result<(), Error> {
+        sqlx::query("DELETE FROM admins WHERE user_id = ?")
+            .bind(user_id )
+            .execute(&*self.db)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_admin_with_traversal(&self, user_id: i64, remover_id: i64) -> Result<bool, Error> {
         let mut admin = match self.get_admin(user_id).await? {
-            Some(admin) => admin,
+            Some(a) => a,
             None => return Ok(false),
         };
 
-        // Traverse the adder chain until find the remover
         while let Some(adder) = admin.added_by {
             if adder == remover_id {
-                conn.execute(
-                    "DELETE FROM admins WHERE user_id = ?1",
-                    params![user_id],
-                )?;
+                self.remove_admin(user_id).await?;
                 return Ok(true);
             }
-
             admin = match self.get_admin(adder).await? {
-                Some(admin) => admin,
+                Some(a) => a,
                 None => return Ok(false),
             };
         }
-        
+
         Ok(false)
     }
 
-    pub async fn make_superadmin(
-        &self, 
-        user_id: u64,
-    ) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().await;
-        conn.execute(
-            "UPDATE admins SET added_by = NULL WHERE user_id = ?1",
-            params![user_id],
-        )?;
+    pub async fn make_superadmin(&self, user_id: i64) -> Result<(), Error> {
+        sqlx::query("UPDATE admins SET added_by = NULL WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&*self.db)
+            .await?;
         Ok(())
     }
 
-    pub async fn get_whitelisted_threads(
-        &self, 
-        group_id: i64,
-    ) -> Result<Vec<WhitelistedThread>, rusqlite::Error> {
-        let conn = self.db.lock().await;
+    pub async fn get_whitelisted_threads(&self, group_id: i64) -> Result<Vec<WhitelistedThread>, Error> {
+        let threads = sqlx::query_as::<_, WhitelistedThread>(
+            "SELECT thread_id, group_id, group_name, thread_name, added_by, created_at FROM whitelisted_threads WHERE group_id = ?",
+        )
+        .bind(group_id)
+        .fetch_all(&*self.db)
+        .await?;
 
-        let mut stmt = conn.prepare(
-            "SELECT thread_id, group_id, group_name, thread_name, added_by, created_at FROM whitelisted_threads WHERE group_id = ?1",
-        )?;
-        let mut rows = stmt.query(params![group_id])?;
-        
-        let mut threads = Vec::new();
-        
-        while let Some(row) = rows.next()? {
-            threads.push(WhitelistedThread {
-                thread_id: row.get(0)?,
-                group_id: row.get(1)?,
-                group_name: row.get(2)?,
-                thread_name: row.get(3)?,
-                added_by: row.get(4)?,
-                created_at: row.get(5)?,
-            });
-        }
-        
         Ok(threads)
     }
 
-    pub async fn get_whitelisted_groups(&self) -> Result<Vec<WhitelistedGroup>, rusqlite::Error> {
-        let conn = self.db.lock().await;
-        let mut stmt = conn.prepare("SELECT group_id, group_name, added_by, created_at FROM whitelisted_groups")?;
-        
-        let mut groups = Vec::new();
-        
-        while let Some(row) = stmt.query([])?.next()? {
-            groups.push(WhitelistedGroup {
-                group_id: row.get(0)?,
-                group_name: row.get(1)?,
-                added_by: row.get(2)?,
-                created_at: row.get(3)?,
-            });
-        }
-        
+    pub async fn get_whitelisted_groups(&self) -> Result<Vec<WhitelistedGroup>, Error> {
+        let groups = sqlx::query_as::<_, WhitelistedGroup>(
+            "SELECT group_id, group_name, added_by, created_at FROM whitelisted_groups",
+        )
+        .fetch_all(&*self.db)
+        .await?;
+
         Ok(groups)
     }
 
-    pub async fn get_admin(&self, user_id: u64) -> Result<Option<Admin>, rusqlite::Error> {
-        let conn = self.db.lock().await;
-        let mut stmt = conn.prepare("SELECT user_id, name, added_by, added_at FROM admins WHERE user_id = ?1")?;
-        let mut rows = stmt.query(params![user_id])?;
+    pub async fn get_admin(&self, user_id: i64) -> Result<Option<Admin>, Error> {
+        let admin = sqlx::query_as::<_, Admin>(
+            "SELECT user_id, name, added_by, added_at FROM admins WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&*self.db)
+        .await?;
 
-        if let Some(row) = rows.next()? {
-            return Ok(Some(Admin {
-                user_id: row.get(0)?,
-                name: row.get(1)?,
-                added_by: row.get(2)?,
-                added_at: row.get(3)?,
-            }));
-        }
-
-        Ok(None)
+        Ok(admin)
     }
 
-    pub async fn get_admins(&self) -> Result<Vec<Admin>, rusqlite::Error> {
-        let conn = self.db.lock().await;
-        let mut stmt = conn.prepare("SELECT user_id, name, added_by, added_at FROM admins")?;
-        
-        let mut admins = Vec::new();
-        
-        while let Some(row) = stmt.query([])?.next()? {
-            admins.push(Admin {
-                user_id: row.get(0)?,
-                name: row.get(1)?,
-                added_by: row.get(2)?,
-                added_at: row.get(3)?,
-            });
-        }
-        
+    pub async fn get_admins(&self) -> Result<Vec<Admin>, Error> {
+        let admins = sqlx::query_as::<_, Admin>(
+            "SELECT user_id, name, added_by, added_at FROM admins",
+        )
+        .fetch_all(&*self.db)
+        .await?;
+
         Ok(admins)
     }
 
-    pub async fn is_group_whitelisted(&self, group_id: i64) -> Result<bool, rusqlite::Error> {
-        let conn = self.db.lock().await;
-        let mut stmt = conn.prepare("SELECT 1 FROM whitelisted_groups WHERE group_id = ?1")?;
-        let mut rows = stmt.query(params![group_id])?;
+    pub async fn is_group_whitelisted(&self, group_id: i64) -> Result<bool, Error> {
+        let exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM whitelisted_groups WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_optional(&*self.db)
+            .await?;
 
-        if rows.next()?.is_some() {
-            return Ok(true);
-        }
-
-        Ok(false)
+        Ok(exists.is_some())
     }
 
-    pub async fn is_thread_whitelisted(&self, thread_id: i32, group_id: i64) -> Result<bool, rusqlite::Error> {
-        let conn = self.db.lock().await;
-        let mut stmt = conn.prepare("SELECT 1 FROM whitelisted_threads WHERE thread_id = ?1 AND group_id = ?2")?;
-        let mut rows = stmt.query(params![thread_id, group_id])?;
+    pub async fn is_thread_whitelisted(&self, thread_id: i32, group_id: i64) -> Result<bool, Error> {
+        let exists: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM whitelisted_threads WHERE thread_id = ? AND group_id = ?",
+        )
+        .bind(thread_id)
+        .bind(group_id)
+        .fetch_optional(&*self.db)
+        .await?;
 
-        if rows.next()?.is_some() {
-            return Ok(true);
+        Ok(exists.is_some())
+    }
+
+    pub async fn create_become_admin_request(&self, user_id: i64, user_name: Option<&str>) -> Result<Option<String>, Error> {
+        let request_id = Uuid::now_v7();
+
+        // Check if there is a pending request for this user
+        let exists: Option<(String,)> = sqlx::query_as(
+            "SELECT request_id FROM become_admin_requests WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&*self.db)
+        .await?;
+
+        if exists.is_some() {
+            return Ok(None)
         }
 
-        Ok(false)
+        sqlx::query("INSERT INTO become_admin_requests (request_id, user_id, user_name) VALUES (?, ?, ?)")
+            .bind(request_id.to_string())
+            .bind(user_id)
+            .bind(user_name)
+            .execute(&*self.db)
+            .await?;
+        
+        Ok(Some(request_id.to_string()))
+    }
+
+    pub async fn get_become_admin_requests(&self) -> Result<Vec<BecomeAdminRequest>, Error> {
+        let requests = sqlx::query_as::<_, BecomeAdminRequest>(
+            "SELECT request_id, user_id, user_name, created_at, pending, accepted FROM become_admin_requests",
+        )
+        .fetch_all(&*self.db)
+        .await?;
+
+        Ok(requests)
+    }
+
+    pub async fn approve_become_admin_request(&self, request_id: &str, admin_id: i64) -> Result<(), Error> {
+        // Create transaction, approve the request and create the admin
+        // if the request is not pending, return an error
+        let request = sqlx::query_as::<_, BecomeAdminRequest>(
+            "SELECT request_id, user_id, user_name, created_at, pending, accepted FROM become_admin_requests WHERE request_id = ?",
+        )
+            .bind(request_id)
+            .fetch_optional(&*self.db)
+            .await?;
+
+        if request.is_none() {
+            return Err(Error::RowNotFound);
+        }
+
+        let request = request.unwrap();
+
+        if request.pending.unwrap_or(false) {
+            sqlx::query("UPDATE become_admin_requests SET accepted = TRUE WHERE request_id = ?")
+                .bind(request_id)
+                .execute(&*self.db)
+                .await?;
+
+            self.add_admin(request.user_id, admin_id, request.user_name.as_deref()).await?;
+
+            return Ok(())
+        }
+
+        Err(Error::RowNotFound)
+    }
+
+    pub async fn reject_become_admin_request(&self, request_id: &str) -> Result<(), Error> {
+        // Create transaction, reject the request and delete the request
+        // if the request is not pending, return an error
+        let request = sqlx::query_as::<_, BecomeAdminRequest>(
+            "SELECT request_id, user_id, user_name, created_at, pending, accepted FROM become_admin_requests WHERE request_id = ?",
+        )
+            .bind(request_id)
+            .fetch_optional(&*self.db)
+            .await?;
+
+        if request.is_none() {
+            return Err(Error::RowNotFound);
+        }
+
+        let request = request.unwrap();
+
+        if request.pending.unwrap_or(false) {
+            sqlx::query("UPDATE become_admin_requests SET pending = FALSE WHERE request_id = ?")
+                .bind(request_id)
+                .execute(&*self.db)
+                .await?;
+
+            sqlx::query("DELETE FROM become_admin_requests WHERE request_id = ?")
+                .bind(request_id)
+                .execute(&*self.db)
+                .await?;
+
+            return Ok(())
+        }
+
+        Err(Error::RowNotFound)
     }
 }
-

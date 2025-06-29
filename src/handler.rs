@@ -22,7 +22,7 @@ impl Handler {
         match self.admin_handler.check_whitelist(msg).await {
             Ok(true) => {}
             Ok(false) => {
-                log::info!("Message is not whitelisted: {:?}", msg);
+                log::trace!("Message is not whitelisted: {:?}", msg);
                 return Ok(());
             }
             Err(e) => {
