@@ -8,6 +8,8 @@ PAROU, PAROU A DISCUSSÃO
 miguwu ><
 ";
 
+const MIGUEL_USER: &str = "migeyel";
+
 
 #[tokio::main]
 async fn main() {
@@ -23,6 +25,17 @@ async fn main() {
 }
 
 async fn answer(bot: Bot, msg: Message) -> ResponseResult<()> {
+    let text = msg.text().unwrap_or_default().to_lowercase();
+
+
+    handle_miguel_command(&bot, &msg, &text).await?;
+    handle_miguel_message(&bot, &msg, &text).await?;
+    
+
+    Ok(())
+}
+
+async fn handle_miguel_command(bot: &Bot, msg: &Message, text: &str) -> ResponseResult<()> {
     let miguel_re: Regex = match Regex::new(r"/[A-z0-9À-ÿ]*?miguel[A-z0-9À-ÿ]*") {
         Ok(re) => re,
         Err(e) => {
@@ -31,20 +44,10 @@ async fn answer(bot: Bot, msg: Message) -> ResponseResult<()> {
         }
     };
 
-    let text = msg.text().unwrap_or_default().to_lowercase();
-
-    if miguel_re.is_match(&text) {
-        handle_miguel_command(&bot, &msg).await?;
+    if !miguel_re.is_match(text) {
+        return Ok(());
     }
 
-    if text.contains("miguel") {
-        handle_miguel_message(&bot, &msg).await?;
-    }
-
-    Ok(())
-}
-
-async fn handle_miguel_command(bot: &Bot, msg: &Message) -> ResponseResult<()> {
     log::info!("Received **miguel** command: {:?}", msg);
 
     match msg.thread_id {
@@ -61,9 +64,32 @@ async fn handle_miguel_command(bot: &Bot, msg: &Message) -> ResponseResult<()> {
     Ok(())
 }
 
-async fn handle_miguel_message(bot: &Bot, msg: &Message) -> ResponseResult<()> {
-    log::info!("A wild **miguel** appeared: {:?}", msg);
+async fn handle_miguel_message(bot: &Bot, msg: &Message, text: &str) -> ResponseResult<()> {
+    // Extract message sender
+    if msg.from.is_none() {
+        return Ok(());
+    }
 
+    let from = msg.from.as_ref().unwrap().clone();
+
+    // Check if message is from miguel
+    if 
+        from.username.is_none()
+        || from.username.unwrap() != MIGUEL_USER
+    {
+        return Ok(());
+    }
+
+
+
+    // Check if this is a "miguel" message
+    if !text.contains("miguel") && !text.contains("miguwu") {
+        return Ok(());
+    }
+
+
+    // Received a miguel, react with 🗿
+    log::info!("A wild **miguel** appeared: {:?}", msg);
 
     bot.set_message_reaction(msg.chat.id, msg.id)
         .reaction([ReactionType::Emoji { emoji: "🗿".to_string() }])
