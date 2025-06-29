@@ -7,6 +7,7 @@ COPY Cargo.toml Cargo.lock ./
 
 # INstall the actual application
 COPY src ./src
+COPY migrations ./migrations
 RUN cargo build --release
 
 FROM debian:latest as runner
