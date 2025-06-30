@@ -1,5 +1,0 @@
-services:
-  telos:
-    build:
-      dockerfile: Dockerfile
-    restart: always
