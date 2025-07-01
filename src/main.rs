@@ -1,73 +1,85 @@
+use std::{env, process::exit, sync::Arc};
+
 use dotenv::dotenv;
-use teloxide::{prelude::*, types::ReactionType};
-use regex::Regex;
+use teloxide::prelude::*;
 
-const MIGUEL: &str = "
-PAROU, PAROU A DISCUSSÃO
+mod db;
+mod handler;
+mod admin;
+mod miguel;
 
-miguwu ><
-";
+async fn create_db() -> Result<db::DB, Box<dyn std::error::Error>> {
+    let path = env::var("DATABASE_PATH").unwrap_or_else(|_| "sqlite://db.sqlite?mode=rwc".to_string());
 
+    let db = db::DB::new(&path).await?;
+    db.migrate().await?;
+
+    log::info!("Database created at {:?}", path);
+
+    Ok(db)
+}
 
 #[tokio::main]
 async fn main() {
     dotenv().ok();
 
     pretty_env_logger::init();
+
     log::info!("Starting bot...");
 
-    let bot = Bot::from_env();
-    let schema = Update::filter_message().branch(Message::filter_text().endpoint(answer));
-
-    Dispatcher::builder(bot, schema).build().dispatch().await;
-}
-
-async fn answer(bot: Bot, msg: Message) -> ResponseResult<()> {
-    let miguel_re: Regex = match Regex::new(r"/[A-z0-9À-ÿ]*?miguel[A-z0-9À-ÿ]*") {
-        Ok(re) => re,
+    let token = match env::var("TELOXIDE_TOKEN") {
+        Ok(token) => token,
         Err(e) => {
-            log::error!("Error creating regex: {:?}", e);
-            return Ok(());
+            log::error!("Error getting TELOXIDE_TOKEN: {:?}", e);
+            exit(1);
         }
     };
 
-    let text = msg.text().unwrap_or_default().to_lowercase();
+    let bot = Bot::new(token);
 
-    if miguel_re.is_match(&text) {
-        handle_miguel_command(&bot, &msg).await?;
-    }
-
-    if text.contains("miguel") {
-        handle_miguel_message(&bot, &msg).await?;
-    }
-
-    Ok(())
-}
-
-async fn handle_miguel_command(bot: &Bot, msg: &Message) -> ResponseResult<()> {
-    log::info!("Received **miguel** command: {:?}", msg);
-
-    match msg.thread_id {
-        Some(thread_id) => {
-            bot.send_message(msg.chat.id, MIGUEL)
-                .message_thread_id(thread_id)
-                .await?;
+    let db = match create_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            log::error!("Error creating database: {:?}", e);
+            exit(1);
         }
+    };
+
+
+    let miguel_handler = match miguel::MiguelHandler::new() {
+        Some(handler) => handler,
         None => {
-            bot.send_message(msg.chat.id, MIGUEL).await?;
+            log::error!("Error creating miguel handler");
+            exit(1);
         }
-    }
+    };
 
-    Ok(())
-}
+    let admin_handler = match admin::AdminHandler::new(db.clone()) {
+        Some(handler) => handler,
+        None => {
+            log::error!("Error creating admin handler");
+            exit(1);
+        }
+    };
 
-async fn handle_miguel_message(bot: &Bot, msg: &Message) -> ResponseResult<()> {
-    log::info!("A wild **miguel** appeared: {:?}", msg);
+    let the_handler = Arc::new(handler::Handler::new(miguel_handler, admin_handler));
 
+    let schema = {
+        let handler_clone = Arc::clone(&the_handler); // move clone into closure
 
-    bot.set_message_reaction(msg.chat.id, msg.id)
-        .reaction([ReactionType::Emoji { emoji: "🗿".to_string() }])
-        .await?;
+        Update::filter_message().branch(
+            Message::filter_text().endpoint(
+                move |bot: Bot, msg: Message| {
+                    let handler_clone = Arc::clone(&handler_clone); // clone inside closure
 
-    Ok(())
+                    async move {
+                        handler_clone.handle(&bot, &msg).await?;
+                        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+                    }
+                },
+            ),
+        )
+    };
+
+    Dispatcher::builder(bot, schema).build().dispatch().await;
 }
